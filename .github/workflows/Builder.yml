@@ -136,14 +136,18 @@ jobs:
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
     - name: Set Build Date and Modify File Name
+      id: rename_file
       run: |
           BUILD_DATE=$(TZ=Asia/Manila date +%Y%m%d)
           FILE_NAME="${{ github.event.inputs.MANIFEST_BRANCH }}-unofficial-${{ github.event.inputs.DEVICE_NAME }}-Build-${BUILD_DATE}.img"
           VENDOR_BOOT_PATH=$(find workspace/out/target/product/ -type f -name "vendor_boot.img" | head -n 1)
           if [ -f "$VENDOR_BOOT_PATH" ]; then
-              mv "$VENDOR_BOOT_PATH" "$(dirname "$VENDOR_BOOT_PATH")/${FILE_NAME}"
+              NEW_FILE_PATH="$(dirname "$VENDOR_BOOT_PATH")/${FILE_NAME}"
+              mv "$VENDOR_BOOT_PATH" "$NEW_FILE_PATH"
               echo "BUILD_DATE=${BUILD_DATE}" >> $GITHUB_ENV
               echo "FILE_NAME=${FILE_NAME}" >> $GITHUB_ENV
+              echo "FILE_PATH=${NEW_FILE_PATH}" >> $GITHUB_ENV
+              echo "file_path=${NEW_FILE_PATH}" >> $GITHUB_OUTPUT
           else
               exit 1
           fi
@@ -152,7 +156,7 @@ jobs:
       if: ${{ github.event.inputs.RELEASE_OR_ARTIFACT == 'release' }}
       uses: softprops/action-gh-release@v1
       with:
-          files: workspace/out/target/product/mssi_64_64only_ww_armv82/${{ env.FILE_NAME }}
+          files: ${{ env.FILE_PATH }}
           name: Unofficial TWRP for ${{ github.event.inputs.DEVICE_NAME }} - Build ${{ env.BUILD_DATE }} / ${{ github.run_id }}
           tag_name: ${{ github.run_id }}
           body: |
