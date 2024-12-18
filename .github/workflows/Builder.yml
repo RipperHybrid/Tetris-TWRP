@@ -1,0 +1,175 @@
+name: CMF Recovery Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      MANIFEST_URL:
+        description: 'MANIFEST_URL (if want to use SSH keys, use git@github.com:XXXXX)'
+        required: true
+        default: 'https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp'
+      MANIFEST_BRANCH:
+        description: 'MANIFEST_BRANCH'
+        required: true
+        default: 'twrp-12.1'
+      DEVICE_TREE_URL:
+       description: 'Custom Recovery Tree'
+       required: true
+       default: 'https://github.com/RipperHybrid/tetris-twrp'
+      DEVICE_TREE_BRANCH:
+        description: 'DEVICE_TREE_BRANCH'
+        required: true
+        default: 'master'
+      DEVICE_PATH:
+        description: 'DEVICE_PATH'
+        required: true
+        default: 'device/nothing/Tetris'
+      DEVICE_NAME:
+        description: 'DEVICE_NAME'
+        required: true
+        default: 'Tetris'
+      MAKEFILE_NAME:
+        description: 'MAKEFILE_NAME'
+        required: true
+        default: 'twrp_Tetris'
+      BUILD_TARGET:
+        description: 'BUILD_TARGET'
+        required: true
+        default: 'vendorboot'
+      RELEASE_OR_ARTIFACT:
+        description: 'Choose "release" or "artifact"'
+        required: true
+        type: choice
+        options:
+          - 'release'
+          - 'artifact'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Display Run Parameters
+      run: |
+        echo "::group::User Environment Variables"
+        echo "Manifest URL: ${{ github.event.inputs.MANIFEST_URL }}"
+        echo "Manifest Branch: ${{ github.event.inputs.MANIFEST_BRANCH }}"
+        echo "Device Tree URL: ${{ github.event.inputs.DEVICE_TREE_URL }}"
+        echo "Device Tree Branch: ${{ github.event.inputs.DEVICE_TREE_BRANCH }}"
+        echo "Device Path: ${{ github.event.inputs.DEVICE_PATH }}"
+        echo "Device Name: ${{ github.event.inputs.DEVICE_NAME }}"
+        echo "Makefile Name: ${{ github.event.inputs.MAKEFILE_NAME }}"
+        echo "Build Target: ${{ github.event.inputs.BUILD_TARGET }}.img"
+        echo "::endgroup::"
+ 
+    # You might want to Checkout your repo first, but not mandatory
+    - name: Check Out
+      uses: actions/checkout@v3
+    # Cleanup The Actions Workspace Using Custom Composite Run Actions
+    - name: Cleanup
+      uses: rokibhasansagar/slimhub_actions@main
+      # That's it! Now use your normal steps
+
+    - name: Prepare the environment
+      run: |
+        sudo apt update
+        sudo apt -y upgrade
+        sudo apt update && sudo apt -y upgrade && sudo apt -y install gperf gcc-multilib gcc-10-multilib g++-multilib g++-10-multilib libc6-dev lib32z-dev libgl1-mesa-dev libxml2-utils xsltproc bc ccache lib32readline-dev liblz4-tool libncurses-dev libsdl1.2-dev libxml2 lzop pngcrush schedtool squashfs-tools imagemagick libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev python3
+    - name: Install OpenJDK
+      uses: actions/setup-java@v3
+      with:
+        distribution: 'zulu'
+        java-version: '8'
+
+    - name: Install repo
+      run: |
+        mkdir ~/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        sudo ln -sf ~/bin/repo /usr/bin/repo
+        
+    - name: Initialize repo
+      run: |
+        mkdir workspace
+        cd workspace
+        echo "workspace-folder=$(pwd)" >> $GITHUB_OUTPUT
+        git config --global user.name "RipperHybrid"
+        git config --global user.email "anishsingh0119@gmail.com"
+        repo init --depth=1 -u ${{ github.event.inputs.MANIFEST_URL }} -b ${{ github.event.inputs.MANIFEST_BRANCH }}
+      id: pwd
+          
+    - name: Repo Sync
+      run: |
+        repo sync -j$(nproc --all) --force-sync
+      working-directory: workspace
+      
+    - name: Clone device tree
+      run: |
+        git clone ${{ github.event.inputs.DEVICE_TREE_URL }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} ./${{ github.event.inputs.DEVICE_PATH }}
+      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+
+    - name: Check Build Tree
+      uses: haya14busa/action-cond@v1
+      id: buildtree
+      with:
+        cond: ${{ github.event.inputs.MANIFEST_BRANCH == 'twrp-11' || github.event.inputs.MANIFEST_BRANCH == 'twrp-12.1' }}
+        if_true: twrp
+        if_false: omni
+
+    - name: Sync Device Dependencies
+      run: |
+        bash ${GITHUB_WORKSPACE}/scripts/convert.sh ${{ github.event.inputs.DEVICE_PATH }}/${{ steps.buildtree.outputs.value }}.dependencies
+        repo sync -j$(nproc --all)
+      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+      continue-on-error: true
+
+    - name: Set Swap Space
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 16
+
+    - name: Building recovery
+      run: |
+        source build/envsetup.sh
+        export ALLOW_MISSING_DEPENDENCIES=true
+        lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng && make clean && make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
+      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+
+    - name: Set Build Date and Modify File Name
+      run: |
+          BUILD_DATE=$(TZ=Asia/Manila date +%Y%m%d)
+          FILE_NAME="${{ github.event.inputs.MANIFEST_BRANCH }}-unofficial-${{ github.event.inputs.DEVICE_NAME }}-Build-${BUILD_DATE}.img"
+          VENDOR_BOOT_PATH=$(find workspace/out/target/product/ -type f -name "vendor_boot.img" | head -n 1)
+          if [ -f "$VENDOR_BOOT_PATH" ]; then
+              mv "$VENDOR_BOOT_PATH" "$(dirname "$VENDOR_BOOT_PATH")/${FILE_NAME}"
+              echo "BUILD_DATE=${BUILD_DATE}" >> $GITHUB_ENV
+              echo "FILE_NAME=${FILE_NAME}" >> $GITHUB_ENV
+          else
+              exit 1
+          fi
+
+    - name: Upload to Release or Create Artifact
+      if: ${{ github.event.inputs.RELEASE_OR_ARTIFACT == 'release' }}
+      uses: softprops/action-gh-release@v1
+      with:
+          files: workspace/out/target/product/mssi_64_64only_ww_armv82/${{ env.FILE_NAME }}
+          name: Unofficial TWRP for ${{ github.event.inputs.DEVICE_NAME }} - Build ${{ env.BUILD_DATE }} / ${{ github.run_id }}
+          tag_name: ${{ github.run_id }}
+          body: |
+              Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
+              Device: ${{ github.event.inputs.DEVICE_NAME }}
+              Target: ${{ github.event.inputs.BUILD_TARGET }}.img
+              Status: Tested & Working.
+              Troubleshooting:
+              If you encounter any issues during the installation:
+              Logs: Include detailed logs when reporting problems.
+              Support: Contact Me [AshBorn](https://t.me/Ripper_Hybrid) for assistance.
+
+    - name: Create Artifact
+      if: ${{ github.event.inputs.RELEASE_OR_ARTIFACT == 'artifact' }}
+      uses: actions/upload-artifact@v4
+      with:
+          name: twrp-artifact
+          path: workspace/out/target/product/Tetris/${{ env.FILE_NAME }}
+          compression-level: 9
+          
